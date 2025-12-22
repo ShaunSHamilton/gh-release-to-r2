@@ -110,7 +110,7 @@ jobs:
             const releaseId = process.env.RELEASE_ID;
             const binaryName = process.env.BINARY_NAME;
             const assetName = binaryName; // Name of the file in the release
-            const filePath = `target/release/${binaryName}`;
+            const filePath = `target/x86_64-unknown-linux-gnu/release/${binaryName}`;
             const { owner, repo } = context.repo;
 
             // 1. Check existing assets to delete duplicates (Cleanup for re-runs)
