@@ -1,0 +1,169 @@
+name: Build and Release (Script Version)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write # Required for creating releases and uploading assets
+
+jobs:
+  release:
+    name: Release Logic
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: get meta data
+        id: meta
+        run: |
+          # Extract version and binary name from Cargo.toml
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[0]=="bin") | .name')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      # LOGIC STEP: Check existing release, create draft if needed, or fail if locked.
+      - name: prepare release
+        id: prepare_release
+        uses: actions/github-script@v7
+        env:
+          TAG_NAME: v${{ steps.meta.outputs.version }}
+        with:
+          script: |
+            const tagName = process.env.TAG_NAME;
+            const { owner, repo } = context.repo;
+
+            console.log(`Checking for release with tag: ${tagName}`);
+
+            let release_id = null;
+            let upload_url = null;
+
+            try {
+              // 1. Try to fetch the release by tag
+              const release = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: tagName
+              });
+
+              console.log("Found existing release.");
+              
+              // 2. Check if it is a draft
+              if (!release.data.draft) {
+                core.setFailed(`Release ${tagName} already exists and is PUBLISHED. Cannot overwrite.`);
+                return;
+              }
+
+              console.log("Existing release is a DRAFT. Re-using it.");
+              release_id = release.data.id;
+              upload_url = release.data.upload_url;
+
+            } catch (error) {
+              if (error.status === 404) {
+                console.log("Release not found. Creating new DRAFT release.");
+                
+                // 3. Create new draft release
+                const newRelease = await github.rest.repos.createRelease({
+                  owner,
+                  repo,
+                  tag_name: tagName,
+                  name: tagName,
+                  draft: true,
+                  generate_release_notes: true
+                });
+                
+                release_id = newRelease.data.id;
+                upload_url = newRelease.data.upload_url;
+              } else {
+                throw error;
+              }
+            }
+
+            // Export the ID for future steps
+            core.setOutput("release_id", release_id);
+
+      - name: build binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      # UPLOAD STEP: Uses script to handle "clobbering" (deleting old asset if re-using draft)
+      - name: upload asset
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ steps.prepare_release.outputs.release_id }}
+          BINARY_NAME: ${{ steps.meta.outputs.name }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const releaseId = process.env.RELEASE_ID;
+            const binaryName = process.env.BINARY_NAME;
+            const assetName = binaryName; // Name of the file in the release
+            const filePath = `target/release/${binaryName}`;
+            const { owner, repo } = context.repo;
+
+            // 1. Check existing assets to delete duplicates (Cleanup for re-runs)
+            const assets = await github.rest.repos.listReleaseAssets({
+              owner,
+              repo,
+              release_id: releaseId
+            });
+
+            const existingAsset = assets.data.find(a => a.name === assetName);
+            if (existingAsset) {
+              console.log(`Removing existing asset ID ${existingAsset.id} to allow overwrite.`);
+              await github.rest.repos.deleteReleaseAsset({
+                owner,
+                repo,
+                asset_id: existingAsset.id
+              });
+            }
+
+            // 2. Read binary and upload
+            console.log(`Uploading ${filePath}...`);
+            const fileData = fs.readFileSync(filePath);
+
+            await github.rest.repos.uploadReleaseAsset({
+              owner,
+              repo,
+              release_id: releaseId,
+              name: assetName,
+              data: fileData,
+              headers: {
+                'content-type': 'application/octet-stream',
+                'content-length': fileData.length
+              }
+            });
+            console.log("Upload complete.");
+
+      # FINAL STEP: Publish (flip draft to false)
+      - name: publish release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ steps.prepare_release.outputs.release_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const releaseId = process.env.RELEASE_ID;
+
+            console.log(`Publishing release ID ${releaseId}...`);
+
+            await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: releaseId,
+              draft: false
+            });
+
+            console.log("Release marked as published.");
