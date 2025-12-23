@@ -20,6 +20,9 @@ pub struct EnvVars {
     pub endpoint_url: String,
     #[arg(long = "repo", env = "GITHUB_REPOSITORY")]
     pub github_repository: String,
+    /// Authorization token to use GitHub API
+    #[arg(long, env = "GITHUB_TOKEN")]
+    pub github_token: Option<String>,
     /// Regex patterns to match the asset name on
     ///
     /// Example: `--pattern "\.json$" --pattern "^\d{4}-\d{2}-\d{2}\.txt"`

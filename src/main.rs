@@ -28,6 +28,7 @@ async fn main() -> Result<(), String> {
         access_key_id,
         access_key_secret,
         github_repository,
+        github_token,
         release_id,
         endpoint_url,
         pattern,
@@ -55,7 +56,14 @@ async fn main() -> Result<(), String> {
         .await;
 
     let s3 = s3::Client::new(&config);
-    let gh = octocrab::instance();
+    let gh = if let Some(token) = github_token {
+        octocrab::Octocrab::builder()
+            .personal_token(token)
+            .build()
+            .map_err(|e| e.to_string())?
+    } else {
+        octocrab::Octocrab::default()
+    };
     let (owner, repo_name) = match github_repository.split_once('/') {
         Some(r) => r,
         None => {
