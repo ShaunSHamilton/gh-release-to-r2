@@ -2,7 +2,8 @@ use aws_sdk_s3::{
     self as s3,
     primitives::{ByteStream, SdkBody},
 };
-use tracing::{error, info};
+use clap::Parser;
+use tracing::{debug, error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::EnvVars;
@@ -20,6 +21,8 @@ async fn main() -> Result<(), String> {
         .with(tracing_subscriber::fmt::layer().pretty())
         .init();
 
+    dotenvy::dotenv().ok();
+
     let EnvVars {
         bucket_name,
         access_key_id,
@@ -27,7 +30,15 @@ async fn main() -> Result<(), String> {
         github_repository,
         release_id,
         endpoint_url,
-    } = EnvVars::new();
+        pattern,
+        dry_run,
+        dest,
+    } = EnvVars::parse();
+
+    debug!(
+        bucket_name,
+        access_key_id, github_repository, release_id, endpoint_url, dry_run
+    );
 
     // Configure the client
     let config = aws_config::from_env()
@@ -62,16 +73,49 @@ async fn main() -> Result<(), String> {
             return Err(e.to_string());
         }
     };
-    let version = match release.tag_name.split_once('/') {
-        Some((_, version)) => version,
-        None => return Err(format!("failed to get version from {}", release.tag_name)),
+    // let version = match release.tag_name.split_once('/') {
+    //     Some((_, version)) => version,
+    //     None => return Err(format!("failed to get version from {}", release.tag_name)),
+    // };
+
+    info!(n = release.assets.len(), "found assets");
+
+    let assets = if let Some(pattern) = pattern {
+        release
+            .assets
+            .into_iter()
+            .filter(|a| {
+                for re in &pattern {
+                    if re.is_match(&a.name) {
+                        return true;
+                    }
+                }
+                return false;
+            })
+            .collect()
+    } else {
+        release.assets
     };
 
-    let assets = release.assets;
-    info!(n = assets.len(), "found assets");
     for asset in assets {
         info!(asset = asset.name, size = asset.size, "uploading asset");
-        let dest = format!("{}/{}", version, asset.name);
+        let key = if let Some(ref dest) = dest {
+            dest.join(&asset.name)
+        } else {
+            std::path::PathBuf::from(&asset.name)
+        };
+        let key = if let Some(k) = key.to_str() {
+            k
+        } else {
+            return Err(format!("{:?} is not a valid dest path", key));
+        };
+
+        debug!(?key);
+
+        if dry_run {
+            info!("skipping upload to r2 due to --dry-run");
+            continue;
+        }
         // Download
         let stream = match repo.release_assets().stream(*asset.id).await {
             Ok(s) => s,
@@ -88,7 +132,7 @@ async fn main() -> Result<(), String> {
         let res = s3
             .put_object()
             .bucket(&bucket_name)
-            .key(dest)
+            .key(key)
             .body(byte_stream)
             .content_length(asset.size)
             .send()
